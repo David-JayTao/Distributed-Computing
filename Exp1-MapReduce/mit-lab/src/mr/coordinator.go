@@ -104,8 +104,21 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	}
 
 	if c.phase == phaseReduce {
-		// Reduce 执行器将在下一阶段接入；此处先维持等待语义。
-		reply.Type = TaskWait
+		if i := c.pickRunnableTask(c.reduceTasks); i >= 0 {
+			task := c.reduceTasks[i]
+			reply.Type = TaskReduce
+			reply.TaskID = i
+			reply.Attempt = task.attempt
+			reply.NReduce = c.nReduce
+			reply.NMap = len(c.mapTasks)
+			return nil
+		}
+		if c.allCompleted(c.reduceTasks) {
+			c.phase = phaseDone
+			reply.Type = TaskExit
+		} else {
+			reply.Type = TaskWait
+		}
 		return nil
 	}
 
@@ -140,6 +153,14 @@ func (c *Coordinator) ReportTask(args *ReportTaskArgs, reply *ReportTaskReply) e
 	if args.Success {
 		task.status = taskCompleted
 		reply.Accepted = true
+
+		// 最后一个任务完成时立即推进阶段，避免依赖后续 GetTask 触发；
+		// 这样即使 Worker 恰好在这一刻退出，Done() 仍能正确结束。
+		if args.Type == TaskMap && c.allCompleted(c.mapTasks) {
+			c.phase = phaseReduce
+		} else if args.Type == TaskReduce && c.allCompleted(c.reduceTasks) {
+			c.phase = phaseDone
+		}
 	} else {
 		// 本地执行失败时归还任务，等待下一次分配。
 		task.status = taskIdle

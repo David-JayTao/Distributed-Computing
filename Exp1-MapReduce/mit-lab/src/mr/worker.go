@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -58,8 +60,15 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 				return
 			}
 		case TaskReduce:
-			// Reduce 执行流程将在下一阶段实现。
-			time.Sleep(50 * time.Millisecond)
+			if err := runReduceTask(reducef, reply); err != nil {
+				log.Printf("worker %d: reduce task %d failed: %v", workerID, reply.TaskID, err)
+				reportTask(reply, false)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			if !reportTask(reply, true) {
+				return
+			}
 		}
 	}
 }
@@ -146,6 +155,79 @@ func runMapTask(mapf func(string, string) []KeyValue, task GetTaskReply) error {
 		// 防止 defer 重复关闭。
 		outputs[r].writer = nil
 		outputs[r].file = nil
+	}
+	return nil
+}
+
+// runReduceTask 读取所有 Map 任务对应本 Reduce 分区的中间文件，
+// 按 Key 排序后将相同 Key 的 Value 聚合，调用应用 Reduce 函数，
+// 最终写入 mr-out-<reduceTaskID>。
+func runReduceTask(reducef func(string, []string) string, task GetTaskReply) error {
+	if task.NMap < 0 {
+		return fmt.Errorf("invalid nMap %d", task.NMap)
+	}
+
+	intermediate := make([]KeyValue, 0)
+	for m := 0; m < task.NMap; m++ {
+		name := fmt.Sprintf("mr-%d-%d", m, task.TaskID)
+		f, err := os.Open(name)
+		if err != nil {
+			return fmt.Errorf("open intermediate file %q: %w", name, err)
+		}
+
+		dec := json.NewDecoder(bufio.NewReader(f))
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				if err == io.EOF {
+					break
+				}
+				f.Close()
+				return fmt.Errorf("decode intermediate file %q: %w", name, err)
+			}
+			intermediate = append(intermediate, kv)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("close intermediate file %q: %w", name, err)
+		}
+	}
+
+	sort.Slice(intermediate, func(i, j int) bool {
+		return intermediate[i].Key < intermediate[j].Key
+	})
+
+	outName := fmt.Sprintf("mr-out-%d", task.TaskID)
+	out, err := os.Create(outName)
+	if err != nil {
+		return fmt.Errorf("create output file %q: %w", outName, err)
+	}
+	writer := bufio.NewWriter(out)
+
+	for i := 0; i < len(intermediate); {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := make([]string, 0, j-i)
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+
+		output := reducef(intermediate[i].Key, values)
+		if _, err := fmt.Fprintf(writer, "%v %v\n", intermediate[i].Key, output); err != nil {
+			writer.Flush()
+			out.Close()
+			return fmt.Errorf("write output file %q: %w", outName, err)
+		}
+		i = j
+	}
+
+	if err := writer.Flush(); err != nil {
+		out.Close()
+		return fmt.Errorf("flush output file %q: %w", outName, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close output file %q: %w", outName, err)
 	}
 	return nil
 }
