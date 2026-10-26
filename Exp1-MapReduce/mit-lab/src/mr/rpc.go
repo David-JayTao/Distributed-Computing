@@ -7,16 +7,6 @@ package mr
 // 传输的字段都必须以大写字母开头。
 //
 
-// 以下两个示例类型保留自官方脚手架，便于对照 net/rpc 的基本调用方式。
-// 正式实现使用本文件末尾定义的任务协议。
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
-	Y int
-}
-
 // TaskType 表示一次任务请求的结果类型。
 type TaskType int
 
