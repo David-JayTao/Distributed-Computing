@@ -69,6 +69,11 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 			if !reportTask(reply, true) {
 				return
 			}
+		default:
+			// 协议不匹配通常意味着 Coordinator 与 Worker 版本不一致；
+			// 退避而不是空转，便于通过日志定位问题。
+			log.Printf("worker %d: unknown task type %d", workerID, reply.Type)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 }

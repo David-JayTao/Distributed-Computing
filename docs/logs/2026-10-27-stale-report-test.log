@@ -1,0 +1,5 @@
+=== RUN   TestStage5StateMachineAndStaleReport
+2026/10/27 03:34:36 task 0 timed out after 10s; reassigning
+--- PASS: TestStage5StateMachineAndStaleReport (0.00s)
+PASS
+ok  	6.5840/mr	1.031s
