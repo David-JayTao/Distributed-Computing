@@ -49,14 +49,20 @@ type Coordinator struct {
 }
 
 // pickRunnableTask 在任务数组中寻找可分配的任务。
-// 现阶段只处理空闲任务；超时重派将在容错阶段加入。
+// 空闲任务立即可分配；运行超过 taskTimeout 的任务视为 Worker 失联并被重派。
+// 每次重派都会递增 attempt，使旧 Worker 的迟到报告自动失效。
 // 调用者必须持有 c.mu。
 func (c *Coordinator) pickRunnableTask(tasks []taskInfo) int {
+	now := time.Now()
 	for i := range tasks {
-		if tasks[i].status == taskIdle {
+		expired := tasks[i].status == taskRunning && now.Sub(tasks[i].start) >= taskTimeout
+		if tasks[i].status == taskIdle || expired {
+			if expired {
+				log.Printf("task %d timed out after %v; reassigning", i, taskTimeout)
+			}
 			tasks[i].status = taskRunning
 			tasks[i].attempt++
-			tasks[i].start = time.Now()
+			tasks[i].start = now
 			return i
 		}
 	}

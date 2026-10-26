@@ -83,6 +83,7 @@ func requestTask(workerID int) (GetTaskReply, bool) {
 
 // reportTask 回报任务完成情况。Success=false 表示本地执行失败，
 // Coordinator 会将该任务重新放回待分配状态。
+// Accepted=false 表示任务已被超时重派，本次是迟到报告，不应影响调度状态。
 func reportTask(task GetTaskReply, success bool) bool {
 	args := ReportTaskArgs{
 		Type:    task.Type,
@@ -91,18 +92,40 @@ func reportTask(task GetTaskReply, success bool) bool {
 		Success: success,
 	}
 	reply := ReportTaskReply{}
-	return call("Coordinator.ReportTask", &args, &reply)
+	if !call("Coordinator.ReportTask", &args, &reply) {
+		return false
+	}
+	if success && !reply.Accepted {
+		log.Printf("worker %d: stale completion report for %s task %d attempt %d ignored",
+			os.Getpid(), taskTypeName(task.Type), task.TaskID, task.Attempt)
+	}
+	return true
 }
 
-// mapFile 保存一个中间分区文件的写入资源。
+func taskTypeName(t TaskType) string {
+	if t == TaskMap {
+		return "map"
+	}
+	if t == TaskReduce {
+		return "reduce"
+	}
+	return "unknown"
+}
+
+// mapFile 保存一个中间分区文件的临时写入资源和最终路径。
 type mapFile struct {
-	file   *os.File
-	writer *bufio.Writer
-	enc    *json.Encoder
+	file      *os.File
+	writer    *bufio.Writer
+	enc       *json.Encoder
+	tempName  string
+	finalName string
 }
 
 // runMapTask 读取输入文件，调用应用 Map 函数，并按 ihash(key)%nReduce
 // 将结果写入 nReduce 个中间文件。文件名采用实验建议的 mr-X-Y 形式。
+//
+// 每个分区先写入唯一临时文件，完整落盘后再原子重命名。这样 Reduce
+// 不会读到某次崩溃留下的半截 JSON；失败时清理临时文件，保留原状态。
 func runMapTask(mapf func(string, string) []KeyValue, task GetTaskReply) error {
 	if task.NReduce <= 0 {
 		return fmt.Errorf("invalid nReduce %d", task.NReduce)
@@ -114,28 +137,35 @@ func runMapTask(mapf func(string, string) []KeyValue, task GetTaskReply) error {
 	}
 
 	kvs := mapf(task.InputFile, string(content))
-
 	outputs := make([]mapFile, task.NReduce)
-	closeOutputs := func() {
+
+	cleanup := func() {
 		for i := range outputs {
-			if outputs[i].writer != nil {
-				outputs[i].writer.Flush()
-			}
 			if outputs[i].file != nil {
 				outputs[i].file.Close()
+				outputs[i].file = nil
+			}
+			if outputs[i].tempName != "" {
+				os.Remove(outputs[i].tempName)
+				outputs[i].tempName = ""
 			}
 		}
 	}
-	defer closeOutputs()
+	defer cleanup()
 
 	for r := 0; r < task.NReduce; r++ {
-		name := fmt.Sprintf("mr-%d-%d", task.TaskID, r)
-		f, err := os.Create(name)
+		f, err := os.CreateTemp(".", fmt.Sprintf(".mr-map-%d-%d-*", task.TaskID, r))
 		if err != nil {
-			return fmt.Errorf("create intermediate file %q: %w", name, err)
+			return fmt.Errorf("create temp intermediate file for partition %d: %w", r, err)
 		}
 		w := bufio.NewWriter(f)
-		outputs[r] = mapFile{file: f, writer: w, enc: json.NewEncoder(w)}
+		outputs[r] = mapFile{
+			file:      f,
+			writer:    w,
+			enc:       json.NewEncoder(w),
+			tempName:  f.Name(),
+			finalName: fmt.Sprintf("mr-%d-%d", task.TaskID, r),
+		}
 	}
 
 	for _, kv := range kvs {
@@ -146,22 +176,28 @@ func runMapTask(mapf func(string, string) []KeyValue, task GetTaskReply) error {
 	}
 
 	for r := range outputs {
-		if err := outputs[r].writer.Flush(); err != nil {
-			return fmt.Errorf("flush intermediate file %d: %w", r, err)
+		out := &outputs[r]
+		if err := out.writer.Flush(); err != nil {
+			return fmt.Errorf("flush intermediate partition %d: %w", r, err)
 		}
-		if err := outputs[r].file.Close(); err != nil {
-			return fmt.Errorf("close intermediate file %d: %w", r, err)
+		if err := out.file.Sync(); err != nil {
+			return fmt.Errorf("sync intermediate partition %d: %w", r, err)
 		}
-		// 防止 defer 重复关闭。
-		outputs[r].writer = nil
-		outputs[r].file = nil
+		if err := out.file.Close(); err != nil {
+			return fmt.Errorf("close intermediate partition %d: %w", r, err)
+		}
+		out.file = nil
+		if err := os.Rename(out.tempName, out.finalName); err != nil {
+			return fmt.Errorf("publish intermediate %q: %w", out.finalName, err)
+		}
+		out.tempName = ""
 	}
 	return nil
 }
 
 // runReduceTask 读取所有 Map 任务对应本 Reduce 分区的中间文件，
 // 按 Key 排序后将相同 Key 的 Value 聚合，调用应用 Reduce 函数，
-// 最终写入 mr-out-<reduceTaskID>。
+// 最终以原子方式发布为 mr-out-<reduceTaskID>。
 func runReduceTask(reducef func(string, []string) string, task GetTaskReply) error {
 	if task.NMap < 0 {
 		return fmt.Errorf("invalid nMap %d", task.NMap)
@@ -197,12 +233,22 @@ func runReduceTask(reducef func(string, []string) string, task GetTaskReply) err
 	})
 
 	outName := fmt.Sprintf("mr-out-%d", task.TaskID)
-	out, err := os.Create(outName)
+	out, err := os.CreateTemp(".", fmt.Sprintf(".mr-out-%d-*", task.TaskID))
 	if err != nil {
-		return fmt.Errorf("create output file %q: %w", outName, err)
+		return fmt.Errorf("create temp output file for %q: %w", outName, err)
 	}
-	writer := bufio.NewWriter(out)
+	tempName := out.Name()
+	published := false
+	defer func() {
+		if out != nil {
+			out.Close()
+		}
+		if !published {
+			os.Remove(tempName)
+		}
+	}()
 
+	writer := bufio.NewWriter(out)
 	for i := 0; i < len(intermediate); {
 		j := i + 1
 		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
@@ -215,20 +261,26 @@ func runReduceTask(reducef func(string, []string) string, task GetTaskReply) err
 
 		output := reducef(intermediate[i].Key, values)
 		if _, err := fmt.Fprintf(writer, "%v %v\n", intermediate[i].Key, output); err != nil {
-			writer.Flush()
-			out.Close()
 			return fmt.Errorf("write output file %q: %w", outName, err)
 		}
 		i = j
 	}
 
 	if err := writer.Flush(); err != nil {
-		out.Close()
 		return fmt.Errorf("flush output file %q: %w", outName, err)
 	}
+	if err := out.Sync(); err != nil {
+		return fmt.Errorf("sync output file %q: %w", outName, err)
+	}
 	if err := out.Close(); err != nil {
+		out = nil
 		return fmt.Errorf("close output file %q: %w", outName, err)
 	}
+	out = nil
+	if err := os.Rename(tempName, outName); err != nil {
+		return fmt.Errorf("publish output file %q: %w", outName, err)
+	}
+	published = true
 	return nil
 }
 
