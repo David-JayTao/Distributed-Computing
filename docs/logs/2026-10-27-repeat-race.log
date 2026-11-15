@@ -1,0 +1,14 @@
+=== RUN   TestReduceParallel
+--- PASS: TestReduceParallel (9.06s)
+=== RUN   TestEarlyExit
+--- PASS: TestEarlyExit (7.03s)
+=== RUN   TestReduceParallel
+--- PASS: TestReduceParallel (8.03s)
+=== RUN   TestEarlyExit
+--- PASS: TestEarlyExit (7.04s)
+=== RUN   TestReduceParallel
+--- PASS: TestReduceParallel (9.03s)
+=== RUN   TestEarlyExit
+--- PASS: TestEarlyExit (7.04s)
+PASS
+ok  	6.5840/mr	48.283s

@@ -1,0 +1,55 @@
+# 手工端到端 Word Count 验证日志
+
+- 时间：2026-10-27
+- 测试程序：`src/main/mrcoordinator`、`src/main/mrworker`、`src/mrapps/wc.so`、`src/main/mrsequential`
+- 输入：8 个 `src/main/pg-*.txt` 文件，nReduce=10，4 个并发 Worker
+- 工作目录：`/tmp/mr-demo-final/dist`（临时目录，不进入仓库）
+
+## 执行命令（摘要）
+```bash
+BASE=Exp1-MapReduce/mit-lab/src
+src/main/mrcoordinator /tmp/mr-demo-final.sock src/main/pg-*.txt &
+for i in 1 2 3 4; do src/main/mrworker src/mrapps/wc.so /tmp/mr-demo-final.sock & done
+cat mr-out-* | LC_ALL=C sort > sorted.txt
+src/main/mrsequential src/mrapps/wc.so src/main/pg-*.txt   # 串行基准
+cmp dist/sorted.txt seq/seq-sorted.txt
+```
+
+## 结果
+```text
+output_files=10
+output_lines=22107
+output_size=240K
+cmp_against_sequential=PASS
+sorted_sha256=08d25f8329d8b7054a8330033736775249ffd98ca861f12e24e0cda079322c19
+```
+
+## 排序输出前 12 行
+```text
+A 509
+ABOUT 2
+ACT 8
+ACTRESS 1
+ACTUAL 8
+ADLER 1
+ADVENTURE 12
+ADVENTURES 7
+AFTER 2
+AGREE 16
+AGREEMENT 8
+AK 8
+```
+
+## 指定键的实际结果
+```text
+A 509
+ABOUT 2
+ACT 8
+AND 46
+OF 108
+THE 188
+```
+
+## 说明
+本日志为手工端到端运行记录，不替代官方 `make mr` 测试；官方测试结果见 `docs/实验一测试记录.md`。
+全部 10 个 `mr-out-*` 文件合并后共 22107 行，与串行实现排序后的输出逐字节一致（cmp=PASS）。

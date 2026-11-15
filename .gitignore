@@ -1,0 +1,10 @@
+
+# 实验本地构建产物与测试输出
+Exp1-MapReduce/mit-lab/src/main/mrsequential
+Exp1-MapReduce/mit-lab/src/main/mrcoordinator
+Exp1-MapReduce/mit-lab/src/main/mrworker
+Exp1-MapReduce/mit-lab/src/main/*.so
+Exp1-MapReduce/mit-lab/src/mrapps/*.so
+Exp1-MapReduce/mit-lab/src/mr/mr-out-*
+Exp1-MapReduce/mit-lab/src/mr/mr-tmp-*/
+Exp1-MapReduce/mit-lab/src/mr/mr-*.txt
